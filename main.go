@@ -12,6 +12,7 @@ import (
 
 	"github.com/dvcrn/pocketsmith-frollo/frollo"
 	"github.com/dvcrn/pocketsmith-go"
+	"github.com/getsentry/sentry-go"
 )
 
 const accsToSync = "1657651,1657652"
@@ -22,6 +23,28 @@ type Config struct {
 	PocketsmithToken string
 	AccountsToSync   string
 	NumTransactions  int
+}
+
+func init() {
+	sentryDsn := os.Getenv("SENTRY_DSN")
+	if sentryDsn == "" {
+		log.Println("Warning: Sentry DSN not set. Sentry error tracking will be disabled")
+		return
+	}
+
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn:              sentryDsn,
+		Environment:      "production",
+		Debug:            true,
+		TracesSampleRate: 1.0,
+	})
+
+	if err != nil {
+		log.Fatalf("sentry.Init: %s", err)
+	}
+
+	// Flush buffered events before the program terminates
+	defer sentry.Flush(2 * time.Second)
 }
 
 func getConfig() *Config {
@@ -62,12 +85,14 @@ func main() {
 
 	currentUser, err := ps.GetCurrentUser()
 	if err != nil {
+		sentry.CaptureException(err)
 		panic(err)
 	}
 
 	c := frollo.NewClient()
 	_, err = c.Login(config.FrolloUsername, config.FrolloPassword)
 	if err != nil {
+		sentry.CaptureException(err)
 		panic(err)
 	}
 
@@ -77,6 +102,7 @@ func main() {
 	for _, accId := range strings.Split(config.AccountsToSync, ",") {
 		acc, err := c.GetAccount(accId)
 		if err != nil {
+			sentry.CaptureException(err)
 			panic(err)
 		}
 
@@ -101,6 +127,7 @@ func main() {
 			toDate := fromDate.AddDate(0, -12, 0)
 			txs, err := c.GetTransactions(accId, toDate, fromDate)
 			if err != nil {
+				sentry.CaptureException(err)
 				panic(err)
 			}
 
@@ -125,20 +152,24 @@ func main() {
 			if err == pocketsmith.ErrNotFound {
 				foundInstitution, err = ps.CreateInstitution(currentUser.ID, acc.Provider.Name, strings.ToLower(acc.PrimaryBalance.Currency))
 				if err != nil {
+					sentry.CaptureException(err)
 					panic(err)
 				}
 
 				fmt.Printf("Created institution '%s' with ID %d", foundInstitution.Title, foundInstitution.ID)
 			} else if err != nil {
+				sentry.CaptureException(err)
 				panic(err)
 			}
 
 			// Create account in institution
 			foundAccount, err = ps.CreateAccount(currentUser.ID, foundInstitution.ID, acc.AccountName, strings.ToLower(acc.PrimaryBalance.Currency), pocketsmith.AccountTypeBank)
 			if err != nil {
+				sentry.CaptureException(err)
 				panic(err)
 			}
 		} else if err != nil {
+			sentry.CaptureException(err)
 			panic(err)
 		}
 
@@ -163,12 +194,14 @@ func main() {
 			// check if we already have this transaction
 			txDateParsed, err := time.Parse("2006-01-02", tx.TransactionDate) // is 2025-01-07
 			if err != nil {
+				sentry.CaptureException(err)
 				panic(err)
 			}
 
 			foundTxs, err := ps.SearchTransactionsByMemo(foundAccount.PrimaryTransactionAccount.ID, txDateParsed, tx.Reference)
 			if err != nil {
 				log.Printf("error searching for transactions: %v", err)
+				sentry.CaptureException(err)
 				continue
 			}
 
@@ -182,6 +215,7 @@ func main() {
 
 			amountParsed, err := strconv.ParseFloat(tx.Amount.Amount, 64)
 			if err != nil {
+				sentry.CaptureException(err)
 				panic(err)
 			}
 
@@ -194,6 +228,7 @@ func main() {
 			}
 
 			if _, err := ps.AddTransaction(foundAccount.PrimaryTransactionAccount.ID, psTx); err != nil {
+				sentry.CaptureException(err)
 				log.Printf("error adding transaction: %v", err)
 				continue
 			}
@@ -202,12 +237,14 @@ func main() {
 		// check balance on pocketsmith
 		account, err := ps.FindAccountByName(currentUser.ID, foundAccount.PrimaryTransactionAccount.Name)
 		if err != nil {
+			sentry.CaptureException(err)
 			log.Printf("error finding account: %v", err)
 			continue
 		}
 
 		convertedBalance, err := strconv.ParseFloat(acc.CurrentBalance.Amount, 64)
 		if err != nil {
+			sentry.CaptureException(err)
 			log.Printf("error converting balance: %v", err)
 			continue
 		}
@@ -215,6 +252,7 @@ func main() {
 		if account.CurrentBalance < convertedBalance {
 			log.Printf("updating balance from %f to %f", account.CurrentBalance, convertedBalance)
 			if _, err := ps.UpdateTransactionAccount(foundAccount.PrimaryTransactionAccount.ID, foundAccount.PrimaryTransactionAccount.Institution.ID, convertedBalance, time.Now().Format("2006-01-02")); err != nil {
+				sentry.CaptureException(err)
 				log.Printf("error updating balance: %v", err)
 			}
 		}
